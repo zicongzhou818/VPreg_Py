@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vpreg-py"
+version = "0.1.0"
+description = "GPU-first VPreg non-rigid image registration for neuroscience"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "antspyx==0.6.3",
+    "nibabel==5.4.2",
+    "numpy==2.3.5",
+    "scikit-image==0.26.0",
+    "scipy==1.15.3",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.2.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

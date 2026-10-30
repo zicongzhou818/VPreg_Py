@@ -1,0 +1,25 @@
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+*.egg-info/
+build/
+dist/
+.DS_Store
+Thumbs.db
+
+# PyCharm's generated starter file is unrelated to VPreg.
+main.py
+
+# Generated VPreg tutorial results can be hundreds of megabytes.
+*_VPreg_gpu_*Warp*.nii.gz
+*_VPreg_gpu_*evaluate_tabular.txt
+
+# Local neuroscience inputs: publish only after data-use review.
+img_mov.nii.gz
+img_fix.nii.gz
