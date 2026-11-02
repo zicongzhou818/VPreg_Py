@@ -267,5 +267,6 @@ The public repository should include the full license text in a top-level
 
 ## Citation
 
-Before the public release, add a `CITATION.cff` file containing the preferred
-software citation and related publication details.
+If you use this code in your research, please cite the following paper:
+
+> Zicong Zhou, Baihan Zhao, Andreas Mang, and Guojun Liao. (2025). **VPREG: An Optimal Control Formulation for Diffeomorphic Image Registration Based on the Variational Principle Grid Generation Method**. *arXiv preprint arXiv:2510.13109*. [arXiv:2510.13109](https://arxiv.org/abs/2510.13109)
