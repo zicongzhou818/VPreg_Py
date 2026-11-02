@@ -145,10 +145,12 @@ One linear-regridding run of the development example on an NVIDIA RTX 4060
 produced the following representative result. Exact runtimes and small numerical
 differences can vary by hardware and software build.
 
-| Direction | Time (s) | Dice | SSD ratio | MI increase (%) | JD minimum | JD maximum |
-|---|---:|---:|---:|---:|---:|---:|
-| Forward | 25.288 | 0.98784 | 0.18706 | 47.278 | 0.20891 | 2.4535 |
-| Inverse | 0.71785 | 0.96581 | 0.17593 | 26.631 | 0.40909 | 4.1346 |
+| Implementation | Direction | Time (s) | Dice | SSD ratio | MI increase (%) | JD minimum | JD maximum |
+|---|---|---:|---:|---:|---:|---:|---:|
+| MATLAB | Forward | 57.8992 | 0.98784 | 0.18705 | 47.279 | 0.20870 | 2.4550 |
+| MATLAB | Inverse | 1.8886 | 0.96578 | 0.17593 | 26.626 | 0.40851 | 4.1352 |
+| Python Makima | Forward | 25.288 | 0.98784 | 0.18706 | 47.278 | 0.20891 | 2.4535 |
+| Python Makima | Inverse | 0.71785 | 0.96581 | 0.17593 | 26.631 | 0.40909 | 4.1346 |
 
 ## Python API
 
