@@ -263,9 +263,6 @@ of that license. See the
 [GNU GPL v2 license](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html)
 for the complete terms and warranty disclaimer.
 
-The public repository should include the full license text in a top-level
-`LICENSE` file.
-
 ## Citation
 
 If you use this code in your research, please cite the following paper, which is recently accepted by SIAM Journal on Imaging Sciences:
