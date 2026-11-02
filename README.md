@@ -223,8 +223,7 @@ from utilities import (
 | `VP_LM_simplified.py` | Simplified inverse coordinate-map solver |
 | `utilities.py` | Shared numerical, interpolation, and evaluation routines |
 | `test_VPreg_gpu.py` | NIfTI tutorial and output writer |
-| `tests/` | Unit, parity, device, and end-to-end regression tests |
-| `scripts/check_environment.py` | CUDA, ANTsPyX, FFT, and interpolation smoke test |
+| `check_environment.py` | CUDA, ANTsPyX, FFT, and interpolation smoke test |
 | `requirements*.txt` | Direct, CUDA-specific, and locked dependencies |
 | `pyproject.toml` | Python project metadata and Pytest configuration |
 | `*.m` | Original MATLAB reference implementations |
