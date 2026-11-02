@@ -11,6 +11,7 @@ import torch
 
 __all__ = [
     "voxel2zscore",
+    "makima3d",
     "mutualInfo",
     "matrixpad3D",
     "compute_JD3D",
@@ -26,6 +27,335 @@ def _as_floating_tensor(value: Any, name: str) -> torch.Tensor:
     if tensor.is_complex() or not tensor.is_floating_point():
         raise TypeError(f"{name} must be a real floating-point array; got {tensor.dtype}.")
     return tensor
+
+
+def _makima_axis_derivative_and_weights(
+    values: torch.Tensor,
+    axis: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return one Makima partial and its left/right interval weights."""
+    moved = values.movedim(axis, -1)
+    sample_count = moved.shape[-1]
+    interval_slopes = torch.diff(moved, dim=-1)
+
+    if sample_count == 2:
+        derivative = interval_slopes.expand_as(moved).clone()
+        left_weight = torch.ones_like(moved)
+        right_weight = torch.zeros_like(moved)
+        return tuple(
+            result.movedim(-1, axis).contiguous()
+            for result in (derivative, left_weight, right_weight)
+        )
+
+    # MATLAB's Makima rule first extends the interval slopes by two samples
+    # at both ends.  Linear extrapolation of slopes is used here, not padding
+    # of the original voxel values.
+    slope_minus_1 = 2.0 * interval_slopes[..., :1] - interval_slopes[..., 1:2]
+    slope_minus_2 = 2.0 * slope_minus_1 - interval_slopes[..., :1]
+    slope_plus_1 = 2.0 * interval_slopes[..., -1:] - interval_slopes[..., -2:-1]
+    slope_plus_2 = 2.0 * slope_plus_1 - interval_slopes[..., -1:]
+    extended = torch.cat(
+        (
+            slope_minus_2,
+            slope_minus_1,
+            interval_slopes,
+            slope_plus_1,
+            slope_plus_2,
+        ),
+        dim=-1,
+    )
+
+    # At node i, the forward variation weights the interval slope on the
+    # left, while the backward variation weights the interval on the right.
+    # The half-sum terms are the modification that distinguishes Makima from
+    # Akima and suppresses overshoot near changes between flat regions.
+    forward_variation = (
+        torch.abs(extended[..., 3:] - extended[..., 2:-1])
+        + 0.5 * torch.abs(extended[..., 3:] + extended[..., 2:-1])
+    )
+    backward_variation = (
+        torch.abs(extended[..., 1:-2] - extended[..., :-3])
+        + 0.5 * torch.abs(extended[..., 1:-2] + extended[..., :-3])
+    )
+    total_variation = forward_variation + backward_variation
+    nonzero = total_variation != 0.0
+    safe_total = torch.where(
+        nonzero,
+        total_variation,
+        torch.ones_like(total_variation),
+    )
+    left_weight = torch.where(
+        nonzero,
+        forward_variation / safe_total,
+        torch.zeros_like(total_variation),
+    )
+    right_weight = torch.where(
+        nonzero,
+        backward_variation / safe_total,
+        torch.zeros_like(total_variation),
+    )
+    derivative = (
+        left_weight * extended[..., 1:-2]
+        + right_weight * extended[..., 2:-1]
+    )
+    return tuple(
+        result.movedim(-1, axis).contiguous()
+        for result in (derivative, left_weight, right_weight)
+    )
+
+
+def _extend_interval_differences(
+    differences: torch.Tensor,
+    axis: int,
+) -> torch.Tensor:
+    """Add one linearly extrapolated interval at both ends of an axis."""
+    length = differences.shape[axis]
+    first = differences.narrow(axis, 0, 1)
+    last = differences.narrow(axis, length - 1, 1)
+    if length == 1:
+        before = first
+        after = last
+    else:
+        before = 2.0 * first - differences.narrow(axis, 1, 1)
+        after = 2.0 * last - differences.narrow(axis, length - 2, 1)
+    return torch.cat((before, differences, after), dim=axis)
+
+
+def _makima_mixed_derivative(
+    values: torch.Tensor,
+    axes: tuple[int, ...],
+    axis_weights: tuple[
+        tuple[torch.Tensor, torch.Tensor],
+        tuple[torch.Tensor, torch.Tensor],
+        tuple[torch.Tensor, torch.Tensor],
+    ],
+) -> torch.Tensor:
+    """Estimate a mixed partial using MATLAB's tensor-weight construction."""
+    differences = values
+    for axis in axes:
+        differences = torch.diff(differences, dim=axis)
+    for axis in axes:
+        differences = _extend_interval_differences(differences, axis)
+
+    result: torch.Tensor | None = None
+    for combination in range(1 << len(axes)):
+        slices: list[slice] = [slice(None)] * values.ndim
+        weights: list[torch.Tensor] = []
+        for position, axis in enumerate(axes):
+            side = (combination >> position) & 1
+            slices[axis] = slice(side, side + values.shape[axis])
+            weights.append(axis_weights[axis][side])
+
+        term = differences[tuple(slices)]
+        for weight in weights:
+            term = term * weight
+        result = term if result is None else result + term
+
+    if result is None:  # pragma: no cover - internal calls always supply axes
+        raise RuntimeError("At least one derivative axis is required.")
+    return result
+
+
+def _cubic_hermite_basis(
+    coordinate: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return endpoint value and derivative bases for a unit grid cell."""
+    squared = coordinate.square()
+    cubed = squared * coordinate
+    value_basis = torch.stack(
+        (
+            2.0 * cubed - 3.0 * squared + 1.0,
+            -2.0 * cubed + 3.0 * squared,
+        ),
+        dim=1,
+    )
+    derivative_basis = torch.stack(
+        (
+            cubed - 2.0 * squared + coordinate,
+            cubed - squared,
+        ),
+        dim=1,
+    )
+    return value_basis, derivative_basis
+
+
+def _makima_query_tensor(
+    query: Any,
+    name: str,
+    values: torch.Tensor,
+) -> torch.Tensor:
+    if isinstance(query, torch.Tensor):
+        tensor = query
+        if tensor.device != values.device:
+            raise ValueError(
+                f"{name} must be on {values.device}, not {tensor.device}."
+            )
+        if tensor.dtype != values.dtype:
+            raise TypeError(
+                f"{name} must use {values.dtype}, not {tensor.dtype}."
+            )
+    else:
+        tensor = torch.as_tensor(
+            query,
+            dtype=values.dtype,
+            device=values.device,
+        )
+    if tensor.is_complex() or not tensor.is_floating_point():
+        raise TypeError(f"{name} must be a real floating-point array.")
+    return tensor
+
+
+def makima3d(
+    values: Any,
+    query_x: Any,
+    query_y: Any,
+    query_z: Any,
+    *,
+    chunk_size: int = 262_144,
+) -> torch.Tensor:
+    """Sample a 3-D voxel array with modified-Akima cubic Hermite patches.
+
+    Coordinates use VPreg and MATLAB's 1-based ``(x, y, z)`` convention.
+    ``values`` must contain at least two samples on every axis.  Query arrays
+    may have any common shape and tensor inputs must match ``values`` in dtype
+    and device.  The returned tensor has the query shape and remains on the
+    source device.
+
+    The implementation follows the N-D construction used by MATLAB Makima:
+    modified-Akima weights estimate the three nodal first partials; raw mixed
+    voxel differences are blended by tensor products of those same weights to
+    estimate the pairwise and third mixed partials; the resulting eight nodal
+    fields define a tricubic Hermite patch in every voxel cell.  Evaluation is
+    chunked so that the full set of 64 corner terms is never materialized for
+    an entire image at once.
+    """
+    source = _as_floating_tensor(values, "values")
+    if source.ndim != 3:
+        raise ValueError(
+            f"values must be three-dimensional; got shape {tuple(source.shape)}."
+        )
+    if any(size < 2 for size in source.shape):
+        raise ValueError(
+            "Every values dimension must contain at least two samples; "
+            f"got shape {tuple(source.shape)}."
+        )
+    if source.dtype not in (torch.float32, torch.float64):
+        raise TypeError(
+            "values must use torch.float32 or torch.float64; "
+            f"got {source.dtype}."
+        )
+    source = source.contiguous()
+    if isinstance(chunk_size, bool) or not isinstance(chunk_size, int):
+        raise TypeError("chunk_size must be a positive integer.")
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size must be positive; got {chunk_size}.")
+
+    queries = tuple(
+        _makima_query_tensor(query, name, source)
+        for query, name in (
+            (query_x, "query_x"),
+            (query_y, "query_y"),
+            (query_z, "query_z"),
+        )
+    )
+    query_shape = queries[0].shape
+    if any(query.shape != query_shape for query in queries[1:]):
+        shapes = ", ".join(str(tuple(query.shape)) for query in queries)
+        raise ValueError(f"Query arrays must have the same shape; got {shapes}.")
+    if queries[0].numel() == 0:
+        return source.new_empty(query_shape)
+
+    axis_data = tuple(
+        _makima_axis_derivative_and_weights(source, axis)
+        for axis in range(3)
+    )
+    first_x, first_y, first_z = (data[0] for data in axis_data)
+    axis_weights = tuple((data[1], data[2]) for data in axis_data)
+    mixed_xy = _makima_mixed_derivative(source, (0, 1), axis_weights)
+    mixed_xz = _makima_mixed_derivative(source, (0, 2), axis_weights)
+    mixed_yz = _makima_mixed_derivative(source, (1, 2), axis_weights)
+    mixed_xyz = _makima_mixed_derivative(source, (0, 1, 2), axis_weights)
+    derivative_fields = (
+        ((0, 0, 0), source),
+        ((1, 0, 0), first_x),
+        ((0, 1, 0), first_y),
+        ((0, 0, 1), first_z),
+        ((1, 1, 0), mixed_xy),
+        ((1, 0, 1), mixed_xz),
+        ((0, 1, 1), mixed_yz),
+        ((1, 1, 1), mixed_xyz),
+    )
+    flat_derivative_fields = tuple(
+        (derivative_orders, field.reshape(-1))
+        for derivative_orders, field in derivative_fields
+    )
+    del axis_data, axis_weights
+
+    flat_queries = tuple(query.reshape(-1) for query in queries)
+    nx, ny, nz = source.shape
+    chunks: list[torch.Tensor] = []
+    for start in range(0, flat_queries[0].numel(), chunk_size):
+        stop = min(start + chunk_size, flat_queries[0].numel())
+        coordinate_chunks = tuple(query[start:stop] for query in flat_queries)
+        finite = torch.ones(
+            stop - start,
+            dtype=torch.bool,
+            device=source.device,
+        )
+        cell_indices: list[torch.Tensor] = []
+        fractions: list[torch.Tensor] = []
+        for coordinate, length in zip(
+            coordinate_chunks,
+            (nx, ny, nz),
+        ):
+            coordinate_finite = torch.isfinite(coordinate)
+            finite = finite & coordinate_finite
+            safe_coordinate = torch.where(
+                coordinate_finite,
+                coordinate,
+                torch.ones_like(coordinate),
+            )
+            zero_based = safe_coordinate - 1.0
+            cell = torch.floor(zero_based).to(torch.int64).clamp_(0, length - 2)
+            cell_indices.append(cell)
+            fractions.append(zero_based - cell.to(dtype=source.dtype))
+
+        ix, iy, iz = cell_indices
+        corner_indices = (
+            (
+                torch.stack((ix, ix + 1), dim=1)[:, :, None, None] * ny
+                + torch.stack((iy, iy + 1), dim=1)[:, None, :, None]
+            )
+            * nz
+            + torch.stack((iz, iz + 1), dim=1)[:, None, None, :]
+        ).reshape(-1, 8)
+        bases = tuple(_cubic_hermite_basis(fraction) for fraction in fractions)
+
+        chunk_result: torch.Tensor | None = None
+        for derivative_orders, flat_field in flat_derivative_fields:
+            basis_x = bases[0][derivative_orders[0]]
+            basis_y = bases[1][derivative_orders[1]]
+            basis_z = bases[2][derivative_orders[2]]
+            corner_weights = (
+                basis_x[:, :, None, None]
+                * basis_y[:, None, :, None]
+                * basis_z[:, None, None, :]
+            ).reshape(-1, 8)
+            corner_values = flat_field.index_select(
+                0, corner_indices.reshape(-1)
+            ).reshape(-1, 8)
+            contribution = torch.sum(corner_values * corner_weights, dim=1)
+            chunk_result = (
+                contribution
+                if chunk_result is None
+                else chunk_result + contribution
+            )
+
+        if chunk_result is None:  # pragma: no cover - derivative_fields is fixed
+            raise RuntimeError("Makima interpolation produced no terms.")
+        chunks.append(chunk_result.masked_fill(~finite, torch.nan))
+
+    return torch.cat(chunks).reshape(query_shape)
 
 
 def voxel2zscore(img: Any) -> torch.Tensor:
