@@ -30,6 +30,7 @@ preprocessing is a planned integration rather than part of the current
 - Forward and inverse three-dimensional coordinate maps
 - MATLAB-compatible mutual information, Jacobian, Dice, and SSD calculations
 - Linear GPU interpolation for iterative image warping and regridding
+- GPU-capable three-dimensional Makima interpolation for final image sampling
 - ANTsPyX-compatible Python environment and NIfTI-based tutorial
 - MATLAB reference sources and an automated Pytest regression suite
 
@@ -146,8 +147,8 @@ differences can vary by hardware and software build.
 
 | Direction | Time (s) | Dice | SSD ratio | MI increase (%) | JD minimum | JD maximum |
 |---|---:|---:|---:|---:|---:|---:|
-| Forward | 25.845 | 0.97236 | 0.19357 | 41.605 | 0.20891 | 2.4535 |
-| Inverse | 0.70869 | 0.95081 | 0.18036 | 23.637 | 0.40909 | 4.1346 |
+| Forward | 25.288 | 0.98784 | 0.18706 | 47.278 | 0.20891 | 2.4535 |
+| Inverse | 0.71785 | 0.96581 | 0.17593 | 26.631 | 0.40909 | 4.1346 |
 
 ## Python API
 
@@ -185,6 +186,7 @@ from utilities import (
     evaluations3D,
     gpu_dst_exact,
     gpuPoissonSolver4D,
+    makima3d,
     matrixpad3D,
     mutualInfo,
     voxel2zscore,
@@ -198,11 +200,15 @@ from utilities import (
   device.
 - PyTorch performs volumetric trilinear sampling through five-dimensional
   `grid_sample` tensors.
-- MATLAB provides N-D modified Akima interpolation, whereas SciPy exposes
-  modified Akima interpolation only in one dimension. The two final
-  unnormalized display-image warps therefore use SciPy's CPU cubic B-spline
-  sampler as the closest practical high-order fallback in the supported
-  environment.
+- The two final unnormalized image warps use the local `makima3d` PyTorch
+  implementation. It constructs modified-Akima nodal weights along each axis,
+  uses their tensor products to estimate mixed partial derivatives from raw
+  voxel differences, and evaluates tricubic Hermite patches in chunks on the
+  source tensor's device. Iterative warps and restart/regridding composition
+  remain trilinear.
+- On the bundled 256 × 256 × 150 example, sampling through MATLAB's saved
+  coordinate map differed from MATLAB's Makima-warped image by approximately
+  3.8 × 10⁻⁶ mean absolute intensity and 1.0 × 10⁻⁷ relative L2 error.
 - The original MATLAB Poisson/DST normalization is intentionally retained for
   initial numerical parity because the optimizer parameters were tuned with
   that scaling. Correcting the normalization and retuning are deferred.
@@ -231,7 +237,9 @@ calculation, and evaluation were consolidated into `utilities.py`.
 - The core currently validates array shape but does not compare physical-space
   metadata such as affine, origin, spacing, or direction.
 - The verified environment requires an NVIDIA CUDA GPU.
-- Final high-order interpolation is not an exact N-D Makima implementation.
+- `makima3d` currently targets uniformly spaced, unit voxel grids with
+  MATLAB-style 1-based coordinates; arbitrary nonuniform grid vectors are not
+  supported.
 - Coordinate-map NIfTI files are not standard ANTs transform files.
 - Current optimizer constants retain the calibration of the MATLAB prototype.
 - Validation is ongoing and currently uses a limited number of image pairs.
@@ -259,6 +267,5 @@ The public repository should include the full license text in a top-level
 
 ## Citation
 
-If you use this code in your research, please cite the following paper:
-
-> Zicong Zhou, Baihan Zhao, Andreas Mang, and Guojun Liao. (2025). **VPREG: An Optimal Control Formulation for Diffeomorphic Image Registration Based on the Variational Principle Grid Generation Method**. *arXiv preprint arXiv:2510.13109*. [arXiv:2510.13109](https://arxiv.org/abs/2510.13109)
+Before the public release, add a `CITATION.cff` file containing the preferred
+software citation and related publication details.
